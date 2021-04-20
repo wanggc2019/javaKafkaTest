@@ -1,0 +1,80 @@
+一、kafka概述
+分布式消息队列
+发布/订阅模式 一对多 数据生产后推送给所有得订阅者
+解耦 冗余 扩展性 灵活性&峰值处理 可恢复性 顺序保证 缓冲 异步通信
+
+kafka只保证按一个partition中的顺序将消息发给consumer，不保证一个topic的整体（多个partition间）的顺序；
+
+二、kafka工作流程分析
+2.1 写入方式
+producer -->push topic--> broker --> append partition   顺序写磁盘 比 随机写内存 效率高
+2.2 分区
+扩展 提高并发
+ 1 topic --> n partition
+ 1 partition -> n segment
+
+kafka集群有多个broker，broker其实就是集群得节点，挂载磁盘，每个磁盘中有kafka log目录：
+/data01/kafka/data
+/data02/kafka/data
+....
+/data12/kafka/data
+topic的存储：
+drwxr-xr-x 2 kafka kafka  12288 Jun 26 18:27 EVENT_SORCE_TOPIC_DPI_EVENT-5
+drwxr-xr-x 2 kafka kafka   4096 Jul  8 10:02 EVENT_SORCE_TOPIC_HIGHCALL-3
+drwxr-xr-x 2 kafka kafka   4096 Jun 20 11:10 EVENT_SORCE_TOPIC_LLTX-8
+drwxr-xr-x 2 kafka kafka   4096 Jul 11 11:13 EVENT_SORCE_TOPIC_NORMAL-9
+drwxr-xr-x 2 kafka kafka   4096 Jul 16 02:34 event_topic_call_lte-0
+drwxr-xr-x 2 kafka kafka   4096 Jul 15 14:37 event_topic_hn_wifi-3
+
+2.3 副本replication
+默认3
+leader follow1 follow2
+producer和consumer只与leader交互，follower从leader同步数据
+
+2.4 写入流程
+1）producer先从zookeeper的 "/brokers/.../state"节点找到该partition的leader
+2）producer将消息发送给该leader
+3）leader将消息写入本地log
+4）followers从leader pull消息，写入本地log后向leader发送ACK
+5）leader收到所有ISR中的replication的ACK后，增加HW（high watermark，最后commit 的offset）并向producer发送ACK
+
+三、重要得概念
+3.1、ISR:
+in-sync replica ,与leader保持同步的replica集合(包括leader),每个分区一个ISR，由leader维护，只有ISR中的副本才有资格被选举为leader。
+    ISR会将同步落后的follower踢出去，等这些落后的follower同步赶上来的时候又会将其加回到ISR。
+    当ISR中所有Replica都向Leader发送ACK时，leader才commit，这时候producer才能认为一个请求中的消息都commit了。
+
+3.2、LEO：
+是Log End Offset的缩写，它表示了当前日志文件中下一条待写入消息的offset，LEO的大小相当于当前日志分区中最后一条消息的offset
+值加1。分区ISR集合中的每个副本都会维护自身的LEO，而ISR集合中最小的LEO即为分区的HW，对消费这而言只能消费HW之前的消息。
+
+local LEO：
+在Kafka 中是存在两套follower信息的，一套存放在follower所在的broker的缓存上（local LEO），
+remote LEO：
+另一套LEO值保存在leader副本所在的broker 缓存上（remote LEO）。
+这样设计的原因是 需要使用local LEO来更新自身的HW值，利用remote LEO来更新leader 的HW值。
+
+
+3.3、high watermark （HW）
+每个副本都有HW，但是只有leader的HW才能作为标识，ISR集合中最小的LEO即为分区的HW，对消费这而言只能消费HW之前的消息。
+
+Low Watermark（LW）
+
+
+Topic:test      PartitionCount:10       ReplicationFactor:3     Configs:
+        Topic: test     Partition: 0    Leader: 11602   Replicas: 11601,11600,11602     Isr: 11602,11600,11601
+        Topic: test     Partition: 1    Leader: 11602   Replicas: 11602,11601,11603     Isr: 11602,11601,11603
+        Topic: test     Partition: 2    Leader: 11602   Replicas: 11603,11602,11604     Isr: 11602,11604,11603
+        Topic: test     Partition: 3    Leader: 11599   Replicas: 11604,11603,11599     Isr: 11599,11604,11603
+        Topic: test     Partition: 4    Leader: 11599   Replicas: 11599,11604,11600     Isr: 11599,11600,11604
+        Topic: test     Partition: 5    Leader: 11599   Replicas: 11600,11599,11601     Isr: 11599,11600,11601
+        Topic: test     Partition: 6    Leader: 11602   Replicas: 11601,11602,11603     Isr: 11602,11601,11603
+        Topic: test     Partition: 7    Leader: 11602   Replicas: 11602,11603,11604     Isr: 11602,11604,11603
+        Topic: test     Partition: 8    Leader: 11599   Replicas: 11603,11604,11599     Isr: 11599,11604,11603
+        Topic: test     Partition: 9    Leader: 11599   Replicas: 11604,11599,11600     Isr: 11599,11600,11604
+
+问题：分区的leader什么时候会将follower踢出ISR呢？
+这取决于2个参数：replica.lag.time.max.ms 和 eplica.lag.max.messages 这都是可以设置的
+当ISR中的follower落后leader eplica.lag.max.messages条消息时，此时不会立马踢出，而是持续落后超过replica.lag.time.max.ms时间时才会
+被踢出。
+
